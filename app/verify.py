@@ -8,7 +8,9 @@ Runs, in order:
   3. an HTTP smoke test against the running web service
        - GET /health,
        - POST /api/audit success case,
-       - POST /api/audit validation failure case.
+       - POST /api/audit validation failure case,
+       - POST /api/execute/start|advance, idempotent retries, op-id
+         reuse / mismatch / stale-cursor rejection, GET .../status.
 
 BASE_URL may point at an already running instance (compose sets it to the
 web service).  When unset, the script starts gunicorn locally on an
@@ -182,8 +184,16 @@ def _post(base: str, path: str, body: dict):
         return e.code, json.loads(e.read().decode())
 
 
+def _get(base: str, path: str):
+    try:
+        with urllib.request.urlopen(base + path, timeout=5) as resp:
+            return resp.status, json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read().decode())
+
+
 def run_http_smoke() -> bool:
-    stage("3/3 HTTP 冒烟 (health / audit 成功 / audit 失败)")
+    stage("3/3 HTTP 冒烟 (health / audit / 可恢复执行)")
     base = os.environ.get("BASE_URL", "").rstrip("/")
     proc = None
     if not base:
@@ -225,6 +235,67 @@ def run_http_smoke() -> bool:
         check("edges" in body.get("fields", []), "自环错误定位到管段表")
         check(any(l.get("row") == 0 for l in body.get("locations", [])),
               "错误位置精确到第 1 行")
+
+        # ---- resumable execution: start / advance / idempotency / reject --
+        st, body = _post(base, "/api/execute/start",
+                         {"opId": "verify-start", "audit": K4})
+        check(st == 200 and body.get("ok") is True,
+              "POST /api/execute/start 启动执行会话")
+        ex = body["execution"]
+        sid, cursor = ex["sessionId"], ex["cursor"]
+        check(ex["confirmed"] == 0 and ex["totalSteps"] == 8,
+              "新会话已核对前缀为 0，总步数为 8")
+
+        # same op id + same content -> the first stored result/session
+        _, retry = _post(base, "/api/execute/start",
+                         {"opId": "verify-start", "audit": K4})
+        check(retry["execution"]["sessionId"] == sid,
+              "同标识同内容重试启动返回同一会话")
+
+        # op id reused with different parameters
+        _, reused = _post(base, "/api/execute/start",
+                          {"opId": "verify-start", "audit": TRIANGLE})
+        check(reused.get("code") == "op_reused",
+              "异参复用启动操作标识被拒绝")
+
+        # advance exactly one expected prefix step, then retry it
+        step = body["route"][0]
+        edge = next(e for e in body["edges"] if e["id"] == step["edgeId"])
+        direction = "forward" if step["from"] == edge["u"] else "reverse"
+        adv = {"opId": "verify-adv-1", "sessionId": sid, "cursor": cursor,
+               "edgeId": step["edgeId"], "direction": direction,
+               "copy": step["copy"]}
+        st, out = _post(base, "/api/execute/advance", adv)
+        check(st == 200 and out["ok"] and out["execution"]["confirmed"] == 1,
+              "推进与下一预期步骤完全一致时前缀 +1")
+        _, out2 = _post(base, "/api/execute/advance", adv)
+        check(out2["execution"]["confirmed"] == 1 and out2 == out,
+              "同标识同内容重试推进返回首次结果且不重复推进")
+
+        # mismatch (wrong edge id) is rejected and does not partially advance
+        bad_adv = {"opId": "verify-adv-bad", "sessionId": sid,
+                   "cursor": out["execution"]["cursor"],
+                   "edgeId": body["route"][1]["edgeId"],
+                   "direction": "forward", "copy": 99}
+        st, out3 = _post(base, "/api/execute/advance", bad_adv)
+        check(st == 409 and out3.get("code") == "mismatch"
+              and out3["execution"]["confirmed"] == 1,
+              "标识/方向/副本号不符被拒绝且无部分推进")
+
+        # stale cursor: reuse the prefix-0 cursor after prefix reached 1
+        st, out4 = _post(base, "/api/execute/advance",
+                         {"opId": "verify-adv-stale", "sessionId": sid,
+                          "cursor": cursor,
+                          "edgeId": body["route"][1]["edgeId"],
+                          "direction": "forward", "copy": 1})
+        check(st == 409 and out4.get("code") == "stale_cursor"
+              and out4["execution"]["confirmed"] == 1,
+              "过期游标被稳定拒绝")
+
+        # status recovery endpoint
+        st, out5 = _get(base, f"/api/execute/status?sessionId={sid}")
+        check(st == 200 and out5["execution"]["confirmed"] == 1,
+              "GET /api/execute/status 恢复已确认前缀")
         return True
     finally:
         if proc is not None:

@@ -75,6 +75,38 @@
            border:1px solid transparent; font-size:12.5px;}
   .rstep:nth-child(odd){ background:rgba(255,255,255,.02);}
   .rstep.hl { background:rgba(78,161,255,.18); border-color:var(--accent);}
+  .rstep.done { background:rgba(55,211,155,.12); border-color:rgba(55,211,155,.45); }
+  .rstep.next { background:rgba(78,161,255,.25); border-color:var(--accent);
+                box-shadow:0 0 0 1px var(--accent); }
+  .rstep.pending { opacity:.5; }
+  .rstep .mark { width:18px; text-align:center; font-weight:700; }
+  .rstep.done .mark { color:var(--ok); }
+  .rstep.next .mark { color:var(--accent); }
+  .edge-line.exec-next { stroke:var(--ok); stroke-width:5px;
+                stroke-dasharray:7 4; animation:dash 1s linear infinite; }
+  .edge-line.exec-done { opacity:.4; }
+  .elabel.exec-done { fill:#4c8a72; }
+  .elabel.exec-next { fill:var(--ok); font-weight:700; }
+  .chip.exec-done { opacity:.55; }
+  .chip.exec-done::before { content:"✓ "; color:var(--ok); }
+  .chip.exec-next { outline:2px solid var(--ok); }
+  @keyframes dash { to { stroke-dashoffset:-11; } }
+  .progress { height:8px; background:var(--panel2); border:1px solid var(--line);
+              border-radius:5px; overflow:hidden; margin:6px 0; }
+  .progress > i { display:block; height:100%; width:0; background:var(--ok);
+                  transition:width .25s; }
+  .efields { display:grid; grid-template-columns:1fr 104px 70px auto; gap:6px;
+             margin-top:8px; align-items:center; }
+  @media (max-width:1100px){ .efields{ grid-template-columns:1fr 1fr; } }
+  #execMsg { display:none; margin-top:8px; border-radius:8px; padding:8px 10px;
+             font-size:12.5px; }
+  #execMsg.err { display:block; background:rgba(255,93,93,.12);
+             border:1px solid var(--req); color:#ffb3b3; }
+  #execMsg.ok { display:block; background:rgba(55,211,155,.12);
+             border:1px solid var(--ok); color:#9ff0d2; }
+  .banner-ok { display:none; margin-top:8px; background:rgba(55,211,155,.12);
+             border:1px solid var(--ok); color:#9ff0d2; border-radius:8px;
+             padding:9px 12px; font-weight:700; font-size:13px; }
   .rstep .seq { color:var(--muted); width:34px; text-align:right; font-variant-numeric:tabular-nums;}
   .rstep .eid { font-weight:700; min-width:42px;}
   .rstep .copy { color:var(--muted); font-size:11px;}
@@ -151,11 +183,33 @@
     <div class="hint">点选图中管段或上方标签，可在右侧路线中高亮它的全部经过位置；再次点击取消。</div>
   </div>
 
-  <!-- ================= route ================= -->
+  <!-- ================= route / execution ================= -->
   <div class="panel">
-    <h2>③ 规范闭合路线（逐步可核对）</h2>
-    <div id="routeEmpty" class="hint">审计成功后在此展示从检修口出发并返回的逐步路线。</div>
-    <div id="route"></div>
+    <h2>③ 规范闭合路线 · 现场执行核对</h2>
+    <div id="routeEmpty" class="hint">审计成功后在此展示从检修口出发并返回的逐步路线，可启动一次可恢复的现场执行。</div>
+    <div id="execPanel" style="display:none">
+      <div class="progress"><i id="execBar"></i></div>
+      <div class="hint" id="execStatus"></div>
+      <div class="btns">
+        <button class="act" id="execStartBtn" type="button">启动现场执行</button>
+        <button class="ghost" id="execAbandonBtn" type="button" style="display:none">放弃本会话</button>
+      </div>
+      <div id="execControls" style="display:none">
+        <div class="efields">
+          <select id="exEdge"></select>
+          <select id="exDir">
+            <option value="forward">正向</option>
+            <option value="reverse">反向</option>
+          </select>
+          <input id="exCopy" type="number" min="1" step="1" value="1" title="副本号">
+          <button class="act" id="exSubmit" type="button">确认本步</button>
+        </div>
+        <div class="hint">按实际经过逐段提交：管段标识、方向、副本号必须与“下一步”完全一致；任何错误都不会推进。</div>
+      </div>
+      <div id="execMsg"></div>
+      <div class="banner-ok" id="execDone">✓ 全部副本已按序核对，巡检员已回到检修口，执行完成。</div>
+    </div>
+    <div id="route" style="margin-top:10px"></div>
   </div>
 </div>
 
@@ -245,12 +299,16 @@ function clearConclusion() {
   $("graph").innerHTML = "";
   $("route").innerHTML = "";
   $("routeEmpty").style.display = "";
+  $("execPanel").style.display = "none";
 }
 
 /* ---------------- audit call ------------------------------------------- */
 async function doAudit() {
   $("error").style.display = "none";
   clearBadMarks();
+  // A new audit is a new logical operation: any in-flight start op from a
+  // previous (possibly different) conclusion must not shadow it.
+  startOpId = null;
   const payload = {
     nodes: [...document.querySelectorAll(".node-in")].map(i => i.value.trim()),
     edges: [...document.querySelectorAll("#edgeRows tr")].map(tr => ({
@@ -261,6 +319,7 @@ async function doAudit() {
     })),
     start: $("startSel").value,
   };
+  lastAuditPayload = payload;
   let resp;
   try {
     const r = await fetch("/api/audit", {
@@ -280,10 +339,45 @@ async function doAudit() {
     clearConclusion();
     return;
   }
-  lastResult = resp;
-  renderSummary(resp);
-  renderGraph(resp);
-  renderRoute(resp);
+  await adoptAuditResult(resp);
+}
+
+/* Bind a freshly returned audit result, reattaching a stored session only
+   when it is exactly the same route conclusion. */
+async function adoptAuditResult(resp) {
+  const saved = loadSavedSession();
+  if (saved) {
+    let r = null;
+    try {
+      r = await fetchJson("GET", "/api/execute/status?sessionId=" +
+        encodeURIComponent(saved.sessionId));
+    } catch (err) {
+      // Audit itself succeeded, so this is a transient follow-up failure;
+      // keep the local binding so a later refresh can still recover.
+      applyResult(resp, null);
+      return;
+    }
+    if (r.ok && r.execution && sameConclusion(r, resp)) {
+      saveSavedSession(r.execution.sessionId, r.execution.routeDigest);
+      applyResult(r, r.execution);
+      return;
+    }
+    // Definitive answer (unknown session / different route): the old
+    // session must not attach to the new conclusion.
+    clearSavedSession();
+  }
+  applyResult(resp, null);
+}
+
+function applyResult(r, block) {
+  lastResult = r;
+  renderSummary(r);
+  renderGraph(r);
+  renderRoute(r);
+  selectedEdge = null;
+  $("execPanel").style.display = "";
+  $("routeEmpty").style.display = "none";
+  syncExecution(r, block);
 }
 
 function showError(msg, locs) {
@@ -428,9 +522,11 @@ function renderRoute(r) {
   box.innerHTML = "";
   r.route.forEach((st, i) => {
     const div = document.createElement("div");
-    div.className = "rstep";
+    div.className = "rstep pending";
     div.dataset.edgeIndex = st.edgeIndex;
+    div.dataset.seq = st.seq;
     div.innerHTML =
+      `<span class="mark"></span>` +
       `<span class="seq">${st.seq}.</span>` +
       `<span class="eid">${escapeAttr(st.edgeId)}</span>` +
       `<span>${escapeAttr(st.from)} → ${escapeAttr(st.to)}</span>` +
@@ -458,6 +554,308 @@ function selectEdge(index) {
   if (firstHl) firstHl.scrollIntoView({block:"center", behavior:"smooth"});
 }
 
+/* ---------------- resumable execution ----------------------------------- */
+const SESSION_KEY = "pipeAudit.execSession";
+let lastAuditPayload = null;
+let exec = null;          // bound session state (cursor etc.)
+let startOpId = null;     // kept across network retries for idempotency
+let advanceOpId = null;
+
+/* Stable structural equality of two route conclusions (depot + ordered
+   edge id / direction / copy).  The server enforces the HMAC fingerprint;
+   this only decides whether a saved session may reattach on the client, so
+   it works without crypto.subtle on plain-HTTP deployments. */
+function sameConclusion(a, b) {
+  if (!a || !b || a.start !== b.start) return false;
+  const ra = a.route || [], rb = b.route || [];
+  if (ra.length !== rb.length) return false;
+  return ra.every((s, i) => {
+    const t = rb[i];
+    return s.edgeId === t.edgeId && s.from === t.from &&
+           s.to === t.to && s.copy === t.copy;
+  });
+}
+
+function loadSavedSession() {
+  try { return JSON.parse(localStorage.getItem(SESSION_KEY) || "null"); }
+  catch (e) { return null; }
+}
+function saveSavedSession(sessionId, digest) {
+  localStorage.setItem(SESSION_KEY, JSON.stringify(
+    { sessionId, digest, savedAt: Date.now() }));
+}
+function clearSavedSession() { localStorage.removeItem(SESSION_KEY); }
+
+function genOpId() {
+  const rnd = (crypto && crypto.getRandomValues)
+    ? Array.from(crypto.getRandomValues(new Uint8Array(8)),
+        b => b.toString(16).padStart(2, "0")).join("")
+    : Math.random().toString(16).slice(2) + Date.now().toString(16);
+  return "op-" + Date.now().toString(36) + "-" + rnd;
+}
+
+async function fetchJson(method, url, body) {
+  const opts = { method, headers: {} };
+  if (body !== undefined) {
+    opts.headers["Content-Type"] = "application/json";
+    opts.body = JSON.stringify(body);
+  }
+  const resp = await fetch(url, opts);
+  return await resp.json();
+}
+
+function orientMap(r) {
+  const m = {};
+  r.edges.forEach(e => { m[e.id] = [e.u, e.v]; });
+  return m;
+}
+
+function expectedDirection(orient, st) {
+  const [u, v] = orient[st.edgeId];
+  return st.from === u ? "forward" : "reverse";
+}
+
+function syncExecution(r, block) {
+  // (re)populate the edge picker for this concrete conclusion
+  const sel = $("exEdge");
+  sel.innerHTML = r.edges.map(e =>
+    `<option value="${escapeAttr(e.id)}">${escapeAttr(e.id)}</option>`).join("");
+
+  if (block) {
+    // Switching to a different session invalidates any unconfirmed advance
+    // op (its content hash is bound to the previous session/cursor).
+    if (!exec || exec.sessionId !== block.sessionId) advanceOpId = null;
+    exec = {
+      sessionId: block.sessionId,
+      digest: block.routeDigest,
+      cursor: block.cursor,
+      confirmed: block.confirmed,
+      total: block.totalSteps,
+      complete: block.complete,
+    };
+    saveSavedSession(exec.sessionId, exec.digest);
+    $("execStartBtn").style.display = "none";
+    $("execAbandonBtn").style.display = "";
+  } else {
+    exec = null;
+    clearSavedSession();
+    $("execStartBtn").style.display = "";
+    $("execAbandonBtn").style.display = "none";
+    $("execControls").style.display = "none";
+    $("execDone").style.display = "none";
+  }
+  paintExecution(r);
+}
+
+function paintExecution(r) {
+  hideExecMsg();
+  const rows = document.querySelectorAll("#route .rstep");
+  const orient = orientMap(r);
+  rows.forEach((el, i) => {
+    el.classList.remove("done", "next", "pending");
+    el.querySelector(".mark").textContent = "";
+    el.classList.add("pending");
+    if (exec && i < exec.confirmed) {
+      el.classList.remove("pending");
+      el.classList.add("done");
+      el.querySelector(".mark").textContent = "✓";
+    } else if (exec && !exec.complete && i === exec.confirmed) {
+      el.classList.remove("pending");
+      el.classList.add("next");
+      el.querySelector(".mark").textContent = "▶";
+    }
+  });
+
+  // graph + chips linkage: completed edges vs the single next edge.
+  // An edge with several copies counts as done only after every copy is
+  // confirmed; partially confirmed copies keep it in the pending look.
+  document.querySelectorAll(".edge-line,.elabel,.chip")
+    .forEach(el => el.classList.remove("exec-next", "exec-done"));
+
+  if (!exec) {
+    $("execStatus").textContent = "尚未启动执行：启动后核对进度会持久化，刷新或断网可恢复。";
+    $("execBar").style.width = "0";
+    return;
+  }
+
+  $("execBar").style.width =
+    (exec.total ? (exec.confirmed / exec.total) * 100 : 100) + "%";
+  $("execStatus").textContent =
+    `会话 ${exec.sessionId.slice(0, 10)}… 已核对 ${exec.confirmed}/${exec.total} 步` +
+    `（绑定检修口 ${r.start}）`;
+
+  if (exec.complete) {
+    $("execControls").style.display = "none";
+    $("execDone").style.display = "block";
+    // every copy of every edge is confirmed
+    r.route.forEach(s => {
+      document.querySelectorAll(
+        `.edge-line[data-edge-index="${s.edgeIndex}"],` +
+        `.elabel[data-edge-index="${s.edgeIndex}"],` +
+        `.chip[data-edge-index="${s.edgeIndex}"]`)
+        .forEach(el => el.classList.add("exec-done"));
+    });
+    return;
+  }
+  $("execDone").style.display = "none";
+  $("execControls").style.display = "";
+
+  const nxt = r.route[exec.confirmed];
+  const edgeIdx = nxt.edgeIndex;
+  // fully-checked edges: none of their copies remain after the prefix
+  const remainingEdges = new Set(
+    r.route.slice(exec.confirmed).map(s => s.edgeIndex));
+  r.route.slice(0, exec.confirmed).forEach(s => {
+    if (!remainingEdges.has(s.edgeIndex)) {
+      document.querySelectorAll(
+        `.edge-line[data-edge-index="${s.edgeIndex}"],` +
+        `.elabel[data-edge-index="${s.edgeIndex}"],` +
+        `.chip[data-edge-index="${s.edgeIndex}"]`)
+        .forEach(el => el.classList.add("exec-done"));
+    }
+  });
+  document.querySelectorAll(
+      `.edge-line[data-edge-index="${edgeIdx}"],.elabel[data-edge-index="${edgeIdx}"]`)
+    .forEach(el => el.classList.add("exec-next"));
+  document.querySelectorAll(`.chip[data-edge-index="${edgeIdx}"]`)
+    .forEach(el => el.classList.add("exec-next"));
+
+  // convenience defaults; the backend still enforces an exact match
+  $("exEdge").value = nxt.edgeId;
+  $("exDir").value = expectedDirection(orient, nxt);
+  $("exCopy").value = nxt.copy;
+
+  // keep the next expected step visible
+  const row = document.querySelector(`#route .rstep[data-seq="${nxt.seq}"]`);
+  if (row) row.scrollIntoView({ block: "nearest" });
+}
+
+function showExecMsg(kind, msg) {
+  const el = $("execMsg");
+  el.className = kind;
+  el.textContent = (kind === "err" ? "✕ " : "✓ ") + msg;
+}
+function hideExecMsg() { const el = $("execMsg"); el.className = ""; el.textContent = ""; }
+
+async function startExecution() {
+  if (!lastResult) return;
+  const btn = $("execStartBtn");
+  btn.disabled = true;
+  startOpId = startOpId || genOpId();
+  try {
+    const r = await fetchJson("POST", "/api/execute/start", {
+      opId: startOpId, audit: lastAuditPayload,
+    });
+    startOpId = null;
+    if (r.ok && r.execution) {
+      syncExecution(lastResult, r.execution);
+      showExecMsg("ok", "执行会话已启动并绑定本次路线摘要与检修口。");
+    } else {
+      showExecMsg("err", r.error || "启动失败");
+      if (r.execution) syncExecution(lastResult, r.execution);
+    }
+  } catch (err) {
+    showExecMsg("err", "网络中断，启动未确认；请点击重试（同一操作标识不会重复建会话）。");
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function advanceExecution() {
+  if (!exec || exec.complete || !lastResult) return;
+  const edgeId = $("exEdge").value;
+  const direction = $("exDir").value;
+  const copy = Number($("exCopy").value);
+  if (!edgeId) { showExecMsg("err", "请选择管段标识"); return; }
+  if (!Number.isInteger(copy) || copy < 1) {
+    showExecMsg("err", "副本号必须为不小于 1 的整数"); return;
+  }
+  const btn = $("exSubmit");
+  btn.disabled = true;
+  advanceOpId = advanceOpId || genOpId();
+  try {
+    const r = await fetchJson("POST", "/api/execute/advance", {
+      opId: advanceOpId,
+      sessionId: exec.sessionId,
+      cursor: exec.cursor,
+      edgeId, direction, copy,
+    });
+    // any definitive server answer invalidates the one-shot op id
+    advanceOpId = null;
+    if (r.ok && r.execution) {
+      exec = {
+        sessionId: r.execution.sessionId,
+        digest: r.execution.routeDigest,
+        cursor: r.execution.cursor,
+        confirmed: r.execution.confirmed,
+        total: r.execution.totalSteps,
+        complete: r.execution.complete,
+      };
+      saveSavedSession(exec.sessionId, exec.digest);
+      paintExecution(lastResult);
+      showExecMsg("ok", exec.complete
+        ? "已确认最后一步并回到检修口，执行完成。"
+        : `第 ${exec.confirmed} 步已确认。`);
+    } else {
+      // stale cursor / concurrent tab: adopt the server-authoritative state
+      if (r.execution) {
+        syncExecution(lastResult, r.execution);
+        showExecMsg("err", r.error || "推进被拒绝，状态未改变");
+      } else {
+        showExecMsg("err", r.error || "推进被拒绝，状态未改变");
+      }
+    }
+  } catch (err) {
+    showExecMsg("err", "网络中断，提交结果未知；请点击重试（同一操作标识只生效一次）。");
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function abandonSession() {
+  if (!confirm("放弃本机当前执行会话？已确认前缀仍保留在服务端，可重新审计后核对。")) return;
+  clearSavedSession();
+  syncExecution(lastResult, null);
+}
+
+async function restoreOnLoad() {
+  const saved = loadSavedSession();
+  if (!saved) return false;
+  try {
+    const r = await fetchJson("GET",
+      "/api/execute/status?sessionId=" + encodeURIComponent(saved.sessionId));
+    if (r.ok && r.execution) {
+      loadInputsFromResult(r);
+      applyResult(r, r.execution);
+      return true;
+    }
+    clearSavedSession();
+  } catch (err) {
+    $("routeEmpty").style.display = "";
+    $("routeEmpty").textContent =
+      "存在未完成的现场执行会话，但当前无法连接服务恢复，请检查网络后刷新。";
+  }
+  return false;
+}
+
+function loadInputsFromResult(r) {
+  document.querySelectorAll("#nodeRows tr,#edgeRows tr").forEach(t => t.remove());
+  (r.nodes || []).forEach(n => addNodeRow(n));
+  (r.edges || []).forEach(e =>
+    addEdgeRow({ id: e.id, u: e.u, v: e.v, length: e.length }));
+  refreshNodeSelects();
+  $("startSel").value = r.start;
+  lastAuditPayload = {
+    nodes: r.nodes,
+    edges: r.edges.map(e => ({ id: e.id, u: e.u, v: e.v, length: e.length })),
+    start: r.start,
+  };
+}
+
+$("execStartBtn").onclick = startExecution;
+$("execAbandonBtn").onclick = abandonSession;
+$("exSubmit").onclick = advanceExecution;
+
 /* ---------------- sample & init ------------------------------------------ */
 function loadSample() {
   document.querySelectorAll("#nodeRows tr,#edgeRows tr").forEach(t => t.remove());
@@ -479,6 +877,9 @@ $("sampleBtn").onclick = loadSample;
 addNodeRow(""); addNodeRow("");
 addEdgeRow();
 refreshNodeSelects();
+
+// re-enter an in-progress execution after refresh / process restart
+restoreOnLoad();
 </script>
 </body>
 </html>

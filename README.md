@@ -74,11 +74,14 @@ pytest -q
 ```
 
 - `tests/test_solver.py`：确定性用例 + 60 组随机图对**逐子集暴力枚举 oracle** 的交叉验证（同优数量、分类、规范集、路线）；
-- `tests/test_api.py`：HTTP 序列化、错误定位、畸形请求。
+- `tests/test_api.py`：HTTP 序列化、错误定位、畸形请求；
+- `tests/test_execution.py`：执行会话的指纹绑定、连续前缀推进、操作标识幂等/异参拒绝、过期/跨会话/伪造游标、并发标签页唯一胜出、重启恢复、新旧审计隔离。
 
 ## 页面
 
 左侧编辑节点/管段/检修口并发起审计；成功后中部展示总长度、增加长度、同优集合数量、规范位向量与按颜色分类的管网图（力导向布局，平行管段分离绘制），右侧为逐步闭合路线。点击图中管段或标签可高亮其在路线中的**全部经过位置**。
+
+审计成功后可在右侧**启动现场执行核对**：会话绑定本次路线摘要（检修口 + 逐步管段标识/方向/副本号的指纹），巡检员按“下一步”逐段提交；路线列表与管网图实时标出**已完成（✓）、下一步（▶ 绿色虚线）、未完成（灰）**。全部副本按序核对并回到检修口才显示完成横幅。进度与操作回执持久化在服务端（SQLite），断网重试、刷新页面乃至 Web 进程重启后都会自动恢复已确认前缀；重新审计得到不同路线时，旧会话不会附着到新结论。
 
 ## API
 
@@ -98,3 +101,23 @@ pytest -q
 `canonicalEdges`、每边 `classification`（required/optional/never）、`route`（逐步方向与副本号）
 及 `positions`（每条边在路线中的全部步序号）。失败返回 `ok:false`、`error`、`fields`、
 `locations`（含表名与行号）。
+
+### 可恢复现场执行
+
+所有启动/推进请求都必须携带唯一 ASCII `opId`（1–64 字符）；同一 `opId` + 同一内容的重试
+返回首次结果，`opId` 异参复用返回 `409 op_reused`。游标为 HMAC 签名令牌，过期游标、跨会话/
+伪造游标返回 `409 stale_cursor`；任何失败都**不会部分推进**。
+
+- `POST /api/execute/start` — body `{opId, audit}`：在服务端重新审计并校验通过后，创建绑定
+  该结论（`routeDigest`、检修口、逐步序列快照）的新会话，返回 `execution`
+  （`sessionId`、`cursor`、`confirmed`、`totalSteps`、`complete`、`next`）。审计失败不建会话，
+  但仍记录回执。
+- `POST /api/execute/advance` — body `{opId, sessionId, cursor, edgeId,
+  direction:"forward"|"reverse", copy}`：仅当管段标识、方向（相对输入端点 A→B 为 forward）、
+  副本号与下一预期步骤**完全一致**时把已确认前缀 +1；不一致返回 `409 mismatch`（附带
+  `expected`）。全部步数完成后返回 `409 already_complete`。
+- `GET /api/execute/status?sessionId=...` — 返回绑定的审计结论快照与当前已确认前缀，用于
+  刷新/重启后恢复。
+
+持久化默认使用容器内 `/data/executions.db`（compose 已挂载命名卷 `exec-data`，WAL 模式，
+多 gunicorn worker/进程重启共享），可用环境变量 `EXECUTION_DB` 覆盖路径。
