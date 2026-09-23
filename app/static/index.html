@@ -17,8 +17,9 @@
            display:flex; align-items:baseline; gap:14px; flex-wrap:wrap; }
   header h1 { font-size:18px; margin:0; }
   header .sub { color:var(--muted); font-size:12px; }
-  .layout { display:grid; grid-template-columns:380px 1fr 360px; gap:14px; padding:14px; }
+  .layout { display:grid; grid-template-columns:380px 1fr 400px; gap:14px; padding:14px; }
   @media (max-width:1100px){ .layout{ grid-template-columns:1fr; } }
+  .colstack { display:flex; flex-direction:column; gap:14px; min-width:0; }
   .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px; }
   .panel h2 { font-size:14px; margin:0 0 10px; color:var(--accent); }
   table.grid { width:100%; border-collapse:collapse; }
@@ -79,6 +80,30 @@
   .rstep .eid { font-weight:700; min-width:42px;}
   .rstep .copy { color:var(--muted); font-size:11px;}
   .rstep .len { margin-left:auto; color:var(--muted);}
+  .rstep.done { border-left:3px solid var(--ok); }
+  .rstep.done .eid, .rstep.done .seq { color:var(--ok); }
+  .rstep.next { border-color:var(--accent); background:rgba(78,161,255,.14);
+                box-shadow:inset 3px 0 0 var(--accent); }
+  .rstep.pending { opacity:.55; }
+  .execstatus { font-size:13px; margin-bottom:8px; }
+  .execstatus b { color:var(--accent); }
+  .execbar { height:8px; background:var(--panel2); border:1px solid var(--line);
+             border-radius:5px; overflow:hidden; margin-bottom:8px; }
+  .execbar > div { height:100%; background:var(--ok); width:0; transition:width .25s; }
+  .execwarn { background:rgba(245,181,61,.12); border:1px solid var(--opt); color:#ffd98a;
+              border-radius:8px; padding:8px 10px; font-size:12.5px; margin-top:8px; }
+  .execdone { background:rgba(55,211,155,.12); border:1px solid var(--ok); color:#9df0d2;
+              border-radius:8px; padding:8px 10px; font-size:13px; margin-top:8px; font-weight:600; }
+  .execroute { max-height:220px; overflow:auto; margin-top:8px; border:1px solid var(--line);
+               border-radius:8px; padding:4px; }
+  .execform { display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; align-items:flex-end; }
+  .execform label { color:var(--muted); font-size:12px; display:flex; flex-direction:column; gap:3px; }
+  .execform input { width:88px; }
+  .execform input.dir { width:64px; }
+  .execform .dirwrap { display:flex; align-items:center; gap:4px; }
+  #execError { display:none; background:rgba(255,93,93,.12); border:1px solid var(--req);
+               color:#ffb3b3; border-radius:8px; padding:8px 10px; margin-top:10px; font-size:12.5px;}
+  .execretry { display:flex; gap:8px; align-items:center; margin-top:8px; }
   .legend { display:flex; gap:12px; flex-wrap:wrap; font-size:12px; color:var(--muted); margin-top:8px;}
   .legend i { display:inline-block; width:18px; height:3px; vertical-align:middle; margin-right:4px; border-radius:2px;}
   .hint { color:var(--muted); font-size:12px; margin-top:6px;}
@@ -151,11 +176,55 @@
     <div class="hint">点选图中管段或上方标签，可在右侧路线中高亮它的全部经过位置；再次点击取消。</div>
   </div>
 
-  <!-- ================= route ================= -->
-  <div class="panel">
-    <h2>③ 规范闭合路线（逐步可核对）</h2>
-    <div id="routeEmpty" class="hint">审计成功后在此展示从检修口出发并返回的逐步路线。</div>
-    <div id="route"></div>
+  <!-- ================= route + execution ================= -->
+  <div class="colstack">
+    <div class="panel">
+      <h2>③ 规范闭合路线（逐步可核对）</h2>
+      <div id="routeEmpty" class="hint">审计成功后在此展示从检修口出发并返回的逐步路线。</div>
+      <div id="route"></div>
+    </div>
+
+    <div class="panel">
+      <h2>④ 执行核对（可恢复）</h2>
+      <div id="execNone">
+        <div class="hint">从一次成功审计启动执行核对；会话绑定该次路线摘要与检修口，游标与操作回执持久化，刷新页面或服务重启后自动恢复已确认前缀。</div>
+        <div class="btns">
+          <button class="act" id="execStartBtn" type="button" disabled>开始执行核对</button>
+        </div>
+      </div>
+      <div id="execMain" style="display:none">
+        <div id="execStatusLine" class="execstatus"></div>
+        <div class="execbar"><div id="execBarFill"></div></div>
+        <div class="hint" id="execBound"></div>
+        <div id="execMismatch" class="execwarn" style="display:none"></div>
+        <div id="execDone" class="execdone" style="display:none"></div>
+        <div id="execRoute" class="execroute"></div>
+        <div id="execFormBox">
+          <div class="execform">
+            <label>管段标识<input id="exEdge" maxlength="24"></label>
+            <label>方向
+              <span class="dirwrap">
+                <input id="exFrom" class="dir" maxlength="24"> →
+                <input id="exTo" class="dir" maxlength="24">
+              </span>
+            </label>
+            <label>副本号<input id="exCopy" type="number" min="1" step="1"></label>
+          </div>
+          <div class="btns">
+            <button class="act" id="execSubmitBtn" type="button">提交核对本步</button>
+            <button class="ghost" id="execFillBtn" type="button">填入下一步</button>
+          </div>
+        </div>
+        <div id="execError"></div>
+        <div class="btns">
+          <button class="ghost" id="execRestartBtn" type="button">基于当前审计重新开始（新会话）</button>
+        </div>
+      </div>
+      <div id="execRetry" class="execretry" style="display:none">
+        <span class="hint">上次请求网络中断，可按原操作标识安全重试（不会重复推进）：</span>
+        <button class="ghost" id="execRetryBtn" type="button">重试</button>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -164,6 +233,7 @@
 /* ---------------- state (persisted in inputs across failures) ---------- */
 let nodeCount = 0, edgeCount = 0;
 let lastResult = null;
+let lastAuditPayload = null;   // exact payload of the displayed successful audit
 let selectedEdge = null;
 
 const $ = (id) => document.getElementById(id);
@@ -240,11 +310,12 @@ function markBad(locations) {
 }
 
 function clearConclusion() {
-  lastResult = null; selectedEdge = null;
+  lastResult = null; lastAuditPayload = null; selectedEdge = null;
   $("summary").style.display = "none";
   $("graph").innerHTML = "";
   $("route").innerHTML = "";
   $("routeEmpty").style.display = "";
+  renderExec();
 }
 
 /* ---------------- audit call ------------------------------------------- */
@@ -281,9 +352,11 @@ async function doAudit() {
     return;
   }
   lastResult = resp;
+  lastAuditPayload = payload;
   renderSummary(resp);
   renderGraph(resp);
   renderRoute(resp);
+  renderExec();
 }
 
 function showError(msg, locs) {
@@ -439,6 +512,7 @@ function renderRoute(r) {
     box.appendChild(div);
   });
   selectedEdge = null;
+  applyExecMarks();
 }
 
 function selectEdge(index) {
@@ -457,6 +531,201 @@ function selectEdge(index) {
   });
   if (firstHl) firstHl.scrollIntoView({block:"center", behavior:"smooth"});
 }
+
+/* ---------------- execution check-off (resumable) ---------------- */
+const LS_EXEC = "pipeAudit.execSessionId";
+let execState = null;      // last known session state from the server
+let pendingRetry = null;   // {path, payload, onResp} for identical retry after network loss
+
+const EXEC_STATE_KEYS = ["sessionId","auditId","status","start","cursor","totalSteps",
+  "nextStep","route","canonicalVector","totalLength","addedLength","optimalCount",
+  "returnedToDepot","createdAt","updatedAt","confirmedStep","replayed"];
+
+function pickState(resp) {
+  const s = {};
+  EXEC_STATE_KEYS.forEach(k => { if (k in resp) s[k] = resp[k]; });
+  return s;
+}
+
+function newOpId(prefix) {
+  return prefix + "-" + Date.now().toString(36) + "-" +
+    Math.random().toString(36).slice(2, 8) + Math.random().toString(36).slice(2, 8);
+}
+
+async function postJson(path, payload) {
+  const r = await fetch(path, {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(payload),
+  });
+  return await r.json();
+}
+
+function execError(msg) {
+  const el = $("execError");
+  el.textContent = msg ? "✕ " + msg : "";
+  el.style.display = msg ? "block" : "none";
+}
+
+function renderRetry() {
+  $("execRetry").style.display = pendingRetry ? "" : "none";
+}
+
+// Network-failure-safe send: an identical retry reuses the same opId + content,
+// so the server returns the first result instead of advancing twice.
+async function sendOp(path, payload, onResp) {
+  try {
+    const resp = await postJson(path, payload);
+    pendingRetry = null;
+    renderRetry();
+    if (onResp) onResp(resp);
+  } catch (e) {
+    pendingRetry = { path, payload, onResp };
+    renderRetry();
+    execError("网络或服务错误：" + e + "。可用原操作标识安全重试，不会重复推进。");
+  }
+}
+
+function startExecution() {
+  if (!lastResult || !lastAuditPayload) return;
+  execError("");
+  const payload = { opId: newOpId("start"), audit: lastAuditPayload };
+  sendOp("/api/execution/start", payload, (resp) => {
+    if (resp.ok) {
+      execState = pickState(resp);
+      localStorage.setItem(LS_EXEC, resp.sessionId);
+    } else {
+      execError(resp.error || "启动执行核对失败");
+    }
+    renderExec();
+  });
+}
+
+function submitStep() {
+  if (!execState || execState.status !== "active") return;
+  execError("");
+  const copy = parseInt($("exCopy").value, 10);
+  const payload = {
+    sessionId: execState.sessionId,
+    opId: newOpId("step"),
+    expectedCursor: execState.cursor,
+    step: {
+      edgeId: $("exEdge").value.trim(),
+      from: $("exFrom").value.trim(),
+      to: $("exTo").value.trim(),
+      copy: Number.isInteger(copy) ? copy : 0,
+    },
+  };
+  sendOp("/api/execution/step", payload, (resp) => {
+    if (resp.ok) {
+      execState = pickState(resp);
+    } else {
+      execError(resp.error || "推进被拒绝");
+      if (resp.code === "not_found") {
+        // 服务端已无此会话：放弃本地引用
+        localStorage.removeItem(LS_EXEC);
+        execState = null;
+      } else if (resp.sessionId && resp.sessionId === execState.sessionId &&
+          typeof resp.cursor === "number") {
+        // 失败不会部分推进；若回执携带服务端当前状态（过期游标/并发争用），据此重新同步
+        execState = Object.assign({}, execState, pickState(resp));
+      }
+    }
+    renderExec();
+  });
+}
+
+function fillStepForm(st) {
+  $("exEdge").value = st.edgeId;
+  $("exFrom").value = st.from;
+  $("exTo").value = st.to;
+  $("exCopy").value = st.copy;
+}
+
+function renderExec() {
+  const has = !!execState;
+  $("execNone").style.display = has ? "none" : "";
+  $("execMain").style.display = has ? "" : "none";
+  $("execStartBtn").disabled = !lastResult;
+  if (!has) { applyExecMarks(); return; }
+  const s = execState;
+  const done = s.status === "completed";
+  $("execStatusLine").innerHTML = done
+    ? `✓ 已完成：全部 ${s.totalSteps} 步按序核对完毕，已回到检修口 <b>${escapeAttr(s.start)}</b>`
+    : `进行中：已核对 <b>${s.cursor}</b> / ${s.totalSteps} 步` +
+      (s.nextStep ? `，下一步：第 ${s.cursor + 1} 步 <b>${escapeAttr(s.nextStep.edgeId)}</b> ` +
+        `${escapeAttr(s.nextStep.from)} → ${escapeAttr(s.nextStep.to)}（第 ${s.nextStep.copy} 副本）` : "");
+  $("execBarFill").style.width = (s.totalSteps ? (100 * s.cursor / s.totalSteps) : 0) + "%";
+  $("execBound").textContent =
+    `检修口 ${s.start} · 会话 ${String(s.sessionId).slice(0, 10)}… · ` +
+    `审计指纹 ${String(s.auditId).slice(0, 12)}… · 规范向量 ${s.canonicalVector}`;
+  const mism = !!(lastResult && lastResult.auditId !== s.auditId);
+  $("execMismatch").style.display = mism ? "" : "none";
+  if (mism) $("execMismatch").textContent =
+    "当前页面的审计结论与该执行会话绑定的路线摘要不同：旧会话不会附着到新结论，以下进度仍属于原审计。";
+  $("execDone").style.display = done ? "" : "none";
+  if (done) $("execDone").textContent =
+    `全部 ${s.totalSteps} 个副本已按序核对并回到检修口 ${s.start}，执行核对完成。`;
+  $("execFormBox").style.display = done ? "none" : "";
+  $("execRestartBtn").disabled = !lastResult;
+
+  const box = $("execRoute");
+  box.innerHTML = "";
+  s.route.forEach((st, i) => {
+    const div = document.createElement("div");
+    div.className = "rstep " + (i < s.cursor ? "done" : (!done && i === s.cursor) ? "next" : "pending");
+    div.innerHTML =
+      `<span class="seq">${st.seq}.</span>` +
+      `<span class="eid">${escapeAttr(st.edgeId)}</span>` +
+      `<span>${escapeAttr(st.from)} → ${escapeAttr(st.to)}</span>` +
+      `<span class="copy">第 ${st.copy} 副本</span>` +
+      `<span class="len">${i < s.cursor ? "✓" : (!done && i === s.cursor ? "▶" : "")}</span>`;
+    box.appendChild(div);
+  });
+  const nextEl = box.querySelector(".rstep.next");
+  if (nextEl) nextEl.scrollIntoView({ block: "nearest" });
+
+  if (!done && s.nextStep) fillStepForm(s.nextStep);
+  applyExecMarks();
+}
+
+// 联动标出主路线列表中的已完成 / 下一步 / 未完成位置；
+// 仅当执行会话绑定的审计指纹与当前结论一致时才附着。
+function applyExecMarks() {
+  const linked = !!(execState && lastResult && lastResult.auditId === execState.auditId);
+  document.querySelectorAll("#route .rstep").forEach((el, i) => {
+    el.classList.remove("done", "next", "pending");
+    if (!linked) return;
+    if (i < execState.cursor) el.classList.add("done");
+    else if (execState.status !== "completed" && i === execState.cursor) el.classList.add("next");
+    else el.classList.add("pending");
+  });
+}
+
+async function restoreExecution() {
+  const sid = localStorage.getItem(LS_EXEC);
+  if (!sid) { renderExec(); return; }
+  try {
+    const r = await fetch("/api/execution/" + encodeURIComponent(sid));
+    const resp = await r.json();
+    if (resp.ok) execState = pickState(resp);
+    else localStorage.removeItem(LS_EXEC);
+  } catch (e) {
+    // 服务暂不可达：保留本地会话号，稍后刷新仍会恢复
+  }
+  renderExec();
+}
+
+$("execStartBtn").onclick = startExecution;
+$("execRestartBtn").onclick = startExecution;
+$("execSubmitBtn").onclick = submitStep;
+$("execFillBtn").onclick = () => {
+  if (execState && execState.nextStep) fillStepForm(execState.nextStep);
+};
+$("execRetryBtn").onclick = () => {
+  if (!pendingRetry) return;
+  const { path, payload, onResp } = pendingRetry;
+  sendOp(path, payload, onResp);  // 同一 opId + 同一内容
+};
 
 /* ---------------- sample & init ------------------------------------------ */
 function loadSample() {
@@ -479,6 +748,8 @@ $("sampleBtn").onclick = loadSample;
 addNodeRow(""); addNodeRow("");
 addEdgeRow();
 refreshNodeSelects();
+renderExec();
+restoreExecution();
 </script>
 </body>
 </html>

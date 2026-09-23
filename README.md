@@ -7,7 +7,8 @@
 - **精确给出全部同优集合数量**（按不同边集合计数，平行管段与等长最短路造成的分解歧义已去重）；
 - 按**边标识字典序**生成 `0` 优先规范位向量并确定规范集合；
 - 依据全部最优集合把每条管段标为 **必重复 / 可重复 / 从不重复**；
-- 为规范集合生成一条从检修口起止、逐步可核对、副本数精确吻合的闭合欧拉路线。
+- 为规范集合生成一条从检修口起止、逐步可核对、副本数精确吻合的闭合欧拉路线；
+- 支持从一次成功审计启动**可恢复的执行核对**：会话绑定该次路线摘要与检修口，按步提交管段标识 / 方向 / 副本号，后端只推进与下一预期步骤完全一致的连续前缀；游标与操作回执持久化，刷新页面或服务重启后自动恢复。
 
 ## 约束与校验
 
@@ -48,7 +49,7 @@ curl http://localhost:${HOST_PORT:-8080}/health
 
 ## 一键核对（verify 单次服务）
 
-名为 `verify` 的服务依次执行：代码测试 → 奇度管网同优分类边界 → 欧拉管网零增程边界 → 镜像构建 → HTTP 冒烟，然后退出，以退出码报告结果。
+名为 `verify` 的服务依次执行：代码测试 → 奇度管网同优分类边界 → 欧拉管网零增程边界 → HTTP 冒烟 → 执行核对流程（幂等 / 游标 / 完成），然后退出，以退出码报告结果。
 
 ```bash
 # 方式一：编排脚本（包含构建 + 健康等待）
@@ -74,11 +75,14 @@ pytest -q
 ```
 
 - `tests/test_solver.py`：确定性用例 + 60 组随机图对**逐子集暴力枚举 oracle** 的交叉验证（同优数量、分类、规范集、路线）；
-- `tests/test_api.py`：HTTP 序列化、错误定位、畸形请求。
+- `tests/test_api.py`：HTTP 序列化、错误定位、畸形请求；
+- `tests/test_execution.py`：执行核对的会话绑定、幂等重试、异参复用 / 过期游标 / 并发争用拒绝、失败不部分推进、重启持久化恢复与 HTTP 全流程。
 
 ## 页面
 
 左侧编辑节点/管段/检修口并发起审计；成功后中部展示总长度、增加长度、同优集合数量、规范位向量与按颜色分类的管网图（力导向布局，平行管段分离绘制），右侧为逐步闭合路线。点击图中管段或标签可高亮其在路线中的**全部经过位置**。
+
+右下方「④ 执行核对」面板从当前审计结论启动执行会话，按步提交管段标识、方向与副本号；页面联动标出**已完成 / 下一步 / 未完成**的路线位置，全部副本按序核对并回到检修口后显示完成。会话进度保存在服务端 SQLite（`PIPE_AUDIT_DB`，默认 `data/execution.db`，compose 挂载卷 `exec_data`），页面刷新、服务重启后自动恢复；重新审计得到不同路线时，旧会话不会附着到新结论。
 
 ## API
 
@@ -94,7 +98,42 @@ pytest -q
 }
 ```
 
-成功返回 `ok:true`、`totalLength`、`addedLength`、`optimalCount`、`canonicalVector`、
+成功返回 `ok:true`、`auditId`（路线摘要指纹）、`totalLength`、`addedLength`、`optimalCount`、`canonicalVector`、
 `canonicalEdges`、每边 `classification`（required/optional/never）、`route`（逐步方向与副本号）
 及 `positions`（每条边在路线中的全部步序号）。失败返回 `ok:false`、`error`、`fields`、
 `locations`（含表名与行号）。
+
+### 执行核对（可恢复）
+
+`POST /api/execution/start` —— 从一次成功审计启动执行会话：
+
+```json
+{
+  "opId": "start-m7q2-abc",
+  "audit": {"nodes": ["A", "B"], "edges": [{"id": "e1", "u": "A", "v": "B", "length": 1}], "start": "A"}
+}
+```
+
+服务端重新核算该审计并把会话绑定到其路线摘要与检修口，返回 `sessionId`、`auditId`、`cursor`、`totalSteps`、`nextStep`、`route` 等完整状态。
+
+`POST /api/execution/step` —— 按步推进：
+
+```json
+{
+  "sessionId": "s…",
+  "opId": "step-m7q3-01",
+  "expectedCursor": 0,
+  "step": {"edgeId": "e1", "from": "A", "to": "B", "copy": 1}
+}
+```
+
+仅当提交的管段标识、方向、副本号与下一预期步骤**完全一致**且 `expectedCursor` 等于服务端游标时才推进连续前缀。
+
+`GET /api/execution/<sessionId>` —— 查询会话当前状态（页面刷新/服务重启后的恢复入口）。
+
+幂等与一致性约定（启动与推进相同）：
+
+- `opId` 为客户端生成的唯一可打印 ASCII 操作标识（1–64 字符）；**同标识同内容**重试返回首次结果（`replayed:true`，不重复推进）；
+- **异参复用**同一标识返回 `op_conflict`，**过期游标**返回 `stale_cursor`，并发标签页争用由单事务序列化后稳定拒绝其一；
+- 任何失败都在写入前校验，不会部分推进；游标与操作回执持久化于 SQLite；
+- 错误响应（`stale_cursor` / `completed` / `step_mismatch`）附带服务端当前状态，便于页面重新同步。

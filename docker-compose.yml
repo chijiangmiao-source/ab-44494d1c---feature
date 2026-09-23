@@ -5,6 +5,9 @@ services:
     ports:
       # 宿主机端口可通过环境变量 HOST_PORT 配置，默认 8080
       - "${HOST_PORT:-8080}:8000"
+    volumes:
+      # 执行核对游标与操作回执（SQLite），进程/容器重启后仍可恢复
+      - exec_data:/srv/data
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).status==200 else 1)"]
       interval: 10s
@@ -26,3 +29,6 @@ services:
       BASE_URL: http://web:8000
     command: ["python", "-m", "app.verify"]
     restart: "no"
+
+volumes:
+  exec_data:

@@ -8,7 +8,10 @@ Runs, in order:
   3. an HTTP smoke test against the running web service
        - GET /health,
        - POST /api/audit success case,
-       - POST /api/audit validation failure case.
+       - POST /api/audit validation failure case;
+  4. the resumable execution check-off over HTTP
+       - idempotent start/step, op-id conflict, stale cursor, mismatch,
+         completion only after the full ordered walk back at the depot.
 
 BASE_URL may point at an already running instance (compose sets it to the
 web service).  When unset, the script starts gunicorn locally on an
@@ -24,6 +27,7 @@ import os
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -182,57 +186,157 @@ def _post(base: str, path: str, body: dict):
         return e.code, json.loads(e.read().decode())
 
 
-def run_http_smoke() -> bool:
-    stage("3/3 HTTP 冒烟 (health / audit 成功 / audit 失败)")
-    base = os.environ.get("BASE_URL", "").rstrip("/")
-    proc = None
-    if not base:
-        port = _free_port()
-        base = f"http://127.0.0.1:{port}"
-        print(f"  启动临时 gunicorn: {base}")
-        proc = subprocess.Popen(
-            [
-                sys.executable, "-m", "gunicorn",
-                "-w", "1", "-b", f"127.0.0.1:{port}",
-                "--timeout", "30", "app.server:app",
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    try:
-        if not _wait_ready(base, proc):
-            print("  FAIL: 服务未在限定时间内就绪")
-            return False
+def _get(base: str, path: str):
+    with urllib.request.urlopen(base + path, timeout=5) as resp:
+        return resp.status, json.loads(resp.read().decode())
+
+
+class _server:
+    """Context manager: reuse BASE_URL or run a temporary local gunicorn."""
+
+    def __enter__(self):
+        self.base = os.environ.get("BASE_URL", "").rstrip("/")
+        self.proc = None
+        self._db = None
+        if not self.base:
+            port = _free_port()
+            self.base = f"http://127.0.0.1:{port}"
+            print(f"  启动临时 gunicorn: {self.base}")
+            self._db = os.path.join(tempfile.mkdtemp(prefix="pipe-audit-"),
+                                    "execution.db")
+            env = dict(os.environ, PIPE_AUDIT_DB=self._db)
+            self.proc = subprocess.Popen(
+                [
+                    sys.executable, "-m", "gunicorn",
+                    "-w", "1", "-b", f"127.0.0.1:{port}",
+                    "--timeout", "30", "app.server:app",
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                env=env,
+            )
+        if not _wait_ready(self.base, self.proc):
+            self.__exit__(None, None, None)
+            raise RuntimeError("服务未在限定时间内就绪")
         print("  PASS: GET /health -> 200")
+        return self.base
 
-        status, body = _post(base, "/api/audit", K4)
-        check(status == 200 and body.get("ok") is True,
-              "POST /api/audit 奇度管网审计成功")
-        check(body.get("optimalCount") == 3, "HTTP 返回同优数量为 3")
-        check(body.get("addedLength") == 2, "HTTP 返回最小增程为 2")
-        check(body.get("canonicalVector") == "001100",
-              "HTTP 返回规范位向量 001100")
-        check(len(body.get("route", [])) == 8,
-              "HTTP 返回 8 步闭合路线（6 原边 + 2 重复副本）")
-
-        status, body = _post(base, "/api/audit", TRIANGLE)
-        check(body.get("ok") and body.get("addedLength") == 0,
-              "HTTP 欧拉管网零增程")
-
-        status, body = _post(base, "/api/audit", BAD)
-        check(status == 200 and body.get("ok") is False,
-              "非法输入返回 ok=false（HTTP 层仍为 200）")
-        check("edges" in body.get("fields", []), "自环错误定位到管段表")
-        check(any(l.get("row") == 0 for l in body.get("locations", [])),
-              "错误位置精确到第 1 行")
-        return True
-    finally:
-        if proc is not None:
-            proc.terminate()
+    def __exit__(self, *exc):
+        if self.proc is not None:
+            self.proc.terminate()
             try:
-                proc.wait(timeout=5)
+                self.proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                proc.kill()
+                self.proc.kill()
+        return False
+
+
+def run_http_smoke(base: str) -> bool:
+    stage("3/4 HTTP 冒烟 (health / audit 成功 / audit 失败)")
+    status, body = _post(base, "/api/audit", K4)
+    check(status == 200 and body.get("ok") is True,
+          "POST /api/audit 奇度管网审计成功")
+    check(body.get("optimalCount") == 3, "HTTP 返回同优数量为 3")
+    check(body.get("addedLength") == 2, "HTTP 返回最小增程为 2")
+    check(body.get("canonicalVector") == "001100",
+          "HTTP 返回规范位向量 001100")
+    check(len(body.get("route", [])) == 8,
+          "HTTP 返回 8 步闭合路线（6 原边 + 2 重复副本）")
+    check(isinstance(body.get("auditId"), str) and body["auditId"],
+          "HTTP 返回审计指纹 auditId")
+
+    status, body = _post(base, "/api/audit", TRIANGLE)
+    check(body.get("ok") and body.get("addedLength") == 0,
+          "HTTP 欧拉管网零增程")
+
+    status, body = _post(base, "/api/audit", BAD)
+    check(status == 200 and body.get("ok") is False,
+          "非法输入返回 ok=false（HTTP 层仍为 200）")
+    check("edges" in body.get("fields", []), "自环错误定位到管段表")
+    check(any(l.get("row") == 0 for l in body.get("locations", [])),
+          "错误位置精确到第 1 行")
+    return True
+
+
+def run_execution_flow(base: str) -> bool:
+    stage("4/4 执行核对（幂等 / 游标 / 争用 / 完成）")
+    _, audit_body = _post(base, "/api/audit", K4)
+    audit_id = audit_body["auditId"]
+
+    # start binds the route summary + depot of this audit
+    _, st = _post(base, "/api/execution/start",
+                  {"opId": "v-start-1", "audit": K4})
+    check(st.get("ok") is True and st.get("cursor") == 0,
+          "启动执行：游标从 0 开始")
+    check(st.get("auditId") == audit_id and st.get("start") == "A",
+          "会话绑定该次路线摘要与检修口")
+    check(st.get("totalSteps") == 8 and st.get("status") == "active",
+          "会话共 8 步，状态为进行中")
+    sid = st["sessionId"]
+
+    # identical retry returns the first result
+    _, again = _post(base, "/api/execution/start",
+                     {"opId": "v-start-1", "audit": K4})
+    check(again.get("ok") and again.get("replayed") is True
+          and again.get("sessionId") == sid,
+          "同标识同内容重试返回首次结果（同一会话）")
+
+    # same op id, different content -> stable rejection
+    _, conflict = _post(base, "/api/execution/start",
+                        {"opId": "v-start-1", "audit": TRIANGLE})
+    check(conflict.get("ok") is False and conflict.get("code") == "op_conflict",
+          "异参复用操作标识被稳定拒绝")
+
+    def step(op, cursor, want):
+        return _post(base, "/api/execution/step", {
+            "sessionId": sid, "opId": op, "expectedCursor": cursor,
+            "step": {"edgeId": want["edgeId"], "from": want["from"],
+                     "to": want["to"], "copy": want["copy"]},
+        })[1]
+
+    # wrong content / stale cursor: rejected, nothing advances
+    bad = dict(st["nextStep"])
+    bad["to"], bad["from"] = bad["from"], bad["to"]  # reversed direction
+    _, r = _post(base, "/api/execution/step", {
+        "sessionId": sid, "opId": "v-bad-dir", "expectedCursor": 0,
+        "step": {"edgeId": bad["edgeId"], "from": bad["from"],
+                 "to": bad["to"], "copy": bad["copy"]}})
+    check(r.get("ok") is False and r.get("code") == "step_mismatch",
+          "方向不一致的步骤被拒绝")
+    r = step("v-stale", 5, st["nextStep"])
+    check(r.get("ok") is False and r.get("code") == "stale_cursor",
+          "过期游标被稳定拒绝")
+    _, got = _get(base, f"/api/execution/{sid}")
+    check(got.get("cursor") == 0, "任何失败都不会部分推进")
+
+    # walk the full route in order
+    for i in range(st["totalSteps"]):
+        r = step(f"v-walk-{i}", i, got["nextStep"])
+        check(r.get("ok") and r.get("cursor") == i + 1,
+              f"第 {i + 1} 步按序推进")
+        got = r
+    check(got.get("status") == "completed"
+          and got.get("returnedToDepot") is True,
+          "全部副本按序核对并回到检修口后显示完成")
+
+    # idempotent replay of an earlier step: first result, no double advance
+    first = st["route"][0]
+    r = step("v-walk-0", 0, first)
+    check(r.get("ok") and r.get("replayed") is True and r.get("cursor") == 1,
+          "重试已成功的步骤返回首次结果，不重复推进")
+
+    # after completion no further advance; restore still works
+    r = step("v-extra", 8, first)
+    check(r.get("ok") is False and r.get("code") == "completed",
+          "完成后拒绝继续推进")
+    _, got = _get(base, f"/api/execution/{sid}")
+    check(got.get("ok") and got.get("cursor") == 8
+          and got.get("status") == "completed",
+          "执行游标与回执已持久化，可恢复已确认前缀")
+    _, got = _get(base, "/api/execution/s00000000000000000000000000000000")
+    check(got.get("ok") is False and got.get("code") == "not_found",
+          "未知会话被稳定拒绝")
+    return True
 
 
 def main() -> int:
@@ -240,7 +344,6 @@ def main() -> int:
     for name, fn in (
         ("代码测试", run_pytest),
         ("同优分类/零增程边界", run_domain_checks),
-        ("HTTP 冒烟", run_http_smoke),
     ):
         try:
             ok = fn()
@@ -250,11 +353,28 @@ def main() -> int:
         if not ok:
             failures.append(name)
 
+    try:
+        with _server() as base:
+            for name, fn in (
+                ("HTTP 冒烟", run_http_smoke),
+                ("执行核对流程", run_execution_flow),
+            ):
+                try:
+                    ok = fn(base)
+                except Exception as exc:  # noqa: BLE001 - report any failure
+                    ok = False
+                    print(f"  FAIL: {name} 抛出异常: {exc!r}")
+                if not ok:
+                    failures.append(name)
+    except Exception as exc:  # noqa: BLE001 - report any failure
+        print(f"  FAIL: 服务启动失败: {exc!r}")
+        failures.extend(["HTTP 冒烟", "执行核对流程"])
+
     print("\n========================================")
     if failures:
         print("VERIFY 失败：" + "、".join(failures))
         return 1
-    print("VERIFY 全部通过：测试 / 奇度同优分类 / 欧拉零增程 / HTTP 冒烟")
+    print("VERIFY 全部通过：测试 / 奇度同优分类 / 欧拉零增程 / HTTP 冒烟 / 执行核对")
     return 0
 
 

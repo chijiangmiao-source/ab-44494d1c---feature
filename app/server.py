@@ -3,8 +3,16 @@
 from __future__ import annotations
 
 import os
+import threading
 from typing import Any, Dict
 
+from .execution import (
+    ExecutionStore,
+    advance_execution,
+    audit_fingerprint,
+    get_execution,
+    start_execution,
+)
 from .solver import AuditError, Edge, RouteStep, audit
 
 
@@ -41,6 +49,7 @@ def _serialize(nodes, edges: list[Edge], result) -> Dict[str, Any]:
 
     return {
         "ok": True,
+        "auditId": audit_fingerprint(result),
         "nodes": nodes,
         "edges": edge_objs,
         "start": result.start,
@@ -79,11 +88,31 @@ def run_audit(payload: Dict[str, Any]) -> Dict[str, Any]:
     return _serialize(result.nodes, result.edges, result)
 
 
-def create_app():
+def _default_db_path() -> str:
+    return os.environ.get("PIPE_AUDIT_DB") or os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "data",
+        "execution.db",
+    )
+
+
+def create_app(store: ExecutionStore | None = None):
     from flask import Flask, jsonify, request, send_from_directory
 
     static_dir = os.path.join(os.path.dirname(__file__), "static")
     app = Flask(__name__, static_folder=static_dir, static_url_path="")
+
+    # Lazily created so importing this module (e.g. for run_audit) has no
+    # filesystem side effects; one store per worker process, all sharing the
+    # same SQLite file.
+    _store_holder: Dict[str, Any] = {"store": store}
+    _store_lock = threading.Lock()
+
+    def exec_store() -> ExecutionStore:
+        with _store_lock:
+            if _store_holder["store"] is None:
+                _store_holder["store"] = ExecutionStore(_default_db_path())
+            return _store_holder["store"]
 
     @app.get("/")
     def index():
@@ -97,6 +126,20 @@ def create_app():
     def api_audit():
         payload = request.get_json(silent=True) or {}
         return jsonify(run_audit(payload))
+
+    @app.post("/api/execution/start")
+    def api_execution_start():
+        payload = request.get_json(silent=True) or {}
+        return jsonify(start_execution(exec_store(), payload))
+
+    @app.post("/api/execution/step")
+    def api_execution_step():
+        payload = request.get_json(silent=True) or {}
+        return jsonify(advance_execution(exec_store(), payload))
+
+    @app.get("/api/execution/<session_id>")
+    def api_execution_get(session_id):
+        return jsonify(get_execution(exec_store(), session_id))
 
     return app
 
