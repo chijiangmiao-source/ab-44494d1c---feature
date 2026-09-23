@@ -1,0 +1,28 @@
+services:
+  web:
+    build: .
+    image: pipe-audit:latest
+    ports:
+      # 宿主机端口可通过环境变量 HOST_PORT 配置，默认 8080
+      - "${HOST_PORT:-8080}:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).status==200 else 1)"]
+      interval: 10s
+      timeout: 4s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+  # 单次服务：核对奇度管网同优分类、欧拉零增程边界、代码测试、构建与 HTTP
+  # 冒烟，输出结果后退出，并用退出码报告成败。
+  # 运行：docker compose build && docker compose run --rm verify
+  verify:
+    image: pipe-audit:latest
+    build: .
+    depends_on:
+      web:
+        condition: service_healthy
+    environment:
+      BASE_URL: http://web:8000
+    command: ["python", "-m", "app.verify"]
+    restart: "no"

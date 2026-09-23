@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>低温冷却管网巡检审计</title>
+<style>
+  :root {
+    --bg:#0f1622; --panel:#182233; --panel2:#1e2a3f; --line:#2c3c56;
+    --text:#e6edf6; --muted:#93a4bd; --accent:#4ea1ff;
+    --req:#ff5d5d; --opt:#f5b53d; --never:#6b7c96; --ok:#37d39b;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.5 "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+         background:var(--bg); color:var(--text); }
+  header { padding:14px 20px; border-bottom:1px solid var(--line);
+           display:flex; align-items:baseline; gap:14px; flex-wrap:wrap; }
+  header h1 { font-size:18px; margin:0; }
+  header .sub { color:var(--muted); font-size:12px; }
+  .layout { display:grid; grid-template-columns:380px 1fr 360px; gap:14px; padding:14px; }
+  @media (max-width:1100px){ .layout{ grid-template-columns:1fr; } }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px; }
+  .panel h2 { font-size:14px; margin:0 0 10px; color:var(--accent); }
+  table.grid { width:100%; border-collapse:collapse; }
+  table.grid th { text-align:left; color:var(--muted); font-weight:600; font-size:12px; padding:3px 4px; }
+  table.grid td { padding:2px; }
+  input, select { background:var(--panel2); border:1px solid var(--line); color:var(--text);
+                  border-radius:6px; padding:5px 7px; width:100%; font-size:13px; }
+  input.bad, select.bad { border-color:var(--req); box-shadow:0 0 0 2px rgba(255,93,93,.25); }
+  .row-del { background:none; border:none; color:var(--muted); cursor:pointer; font-size:15px; padding:2px 6px;}
+  .row-del:hover { color:var(--req); }
+  .btns { display:flex; gap:8px; margin-top:10px; flex-wrap:wrap; }
+  button.act { background:var(--accent); color:#08131f; border:none; border-radius:7px;
+               padding:8px 16px; font-weight:700; cursor:pointer; }
+  button.act:hover { filter:brightness(1.1); }
+  button.ghost { background:transparent; color:var(--muted); border:1px solid var(--line);
+                 border-radius:7px; padding:8px 12px; cursor:pointer; }
+  button.ghost:hover { color:var(--text); }
+  .toolbar { display:flex; gap:8px; align-items:center; margin-top:8px; flex-wrap:wrap;}
+  .toolbar label { color:var(--muted); font-size:12px; }
+  #error { display:none; background:rgba(255,93,93,.12); border:1px solid var(--req);
+           color:#ffb3b3; border-radius:8px; padding:9px 12px; margin-top:10px; font-size:13px;}
+  #error .locs { color:var(--muted); font-size:12px; margin-top:4px;}
+  .stats { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  .stat { background:var(--panel2); border:1px solid var(--line); border-radius:8px; padding:9px 11px;}
+  .stat .k { color:var(--muted); font-size:12px;}
+  .stat .v { font-size:19px; font-weight:700; margin-top:2px;}
+  .vector { font-family:ui-monospace,Menlo,Consolas,monospace; letter-spacing:2px; word-break:break-all;}
+  .vector b.c1 { color:var(--req); }
+  .chips { display:flex; flex-wrap:wrap; gap:6px; margin-top:6px;}
+  .chip { font-size:12px; border-radius:20px; padding:2px 10px; border:1px solid var(--line);
+          cursor:pointer; background:var(--panel2);}
+  .chip.required { border-color:var(--req); color:#ffb3b3;}
+  .chip.optional { border-color:var(--opt); color:#ffd98a;}
+  .chip.never { border-color:var(--never); color:var(--muted);}
+  .chip.dup { box-shadow:inset 0 0 0 1px var(--req);}
+  .chip.sel { outline:2px solid var(--accent);}
+  svg#graph { width:100%; height:520px; background:#0b111c; border-radius:8px;
+              border:1px solid var(--line); display:block;}
+  .edge-hit { stroke:transparent; stroke-width:14px; fill:none; cursor:pointer;}
+  .edge-line { stroke:var(--never); stroke-width:2.5px; fill:none;}
+  .edge-line.required { stroke:var(--req);}
+  .edge-line.optional { stroke:var(--opt);}
+  .edge-line.dup { stroke-width:5px; }
+  .edge-line.sel { filter:drop-shadow(0 0 5px var(--accent)); }
+  .elabel { fill:var(--muted); font-size:10px; pointer-events:none;}
+  .elabel.sel { fill:var(--accent); font-weight:700;}
+  .node-circle { fill:#22344f; stroke:var(--accent); stroke-width:1.5px;}
+  .node-circle.odd { stroke:var(--opt);}
+  .node-circle.start { fill:#1d3a2c; stroke:var(--ok); stroke-width:3px;}
+  .nlabel { fill:var(--text); font-size:11px; text-anchor:middle; pointer-events:none;}
+  .nlabel.start { fill:var(--ok); font-weight:700;}
+  #route { max-height:520px; overflow:auto; margin-top:8px;}
+  .rstep { display:flex; gap:8px; align-items:center; padding:5px 8px; border-radius:6px;
+           border:1px solid transparent; font-size:12.5px;}
+  .rstep:nth-child(odd){ background:rgba(255,255,255,.02);}
+  .rstep.hl { background:rgba(78,161,255,.18); border-color:var(--accent);}
+  .rstep .seq { color:var(--muted); width:34px; text-align:right; font-variant-numeric:tabular-nums;}
+  .rstep .eid { font-weight:700; min-width:42px;}
+  .rstep .copy { color:var(--muted); font-size:11px;}
+  .rstep .len { margin-left:auto; color:var(--muted);}
+  .legend { display:flex; gap:12px; flex-wrap:wrap; font-size:12px; color:var(--muted); margin-top:8px;}
+  .legend i { display:inline-block; width:18px; height:3px; vertical-align:middle; margin-right:4px; border-radius:2px;}
+  .hint { color:var(--muted); font-size:12px; margin-top:6px;}
+  .scrollx { overflow-x:auto;}
+</style>
+</head>
+<body>
+<header>
+  <h1>低温冷却管网 · 巡检路线审计</h1>
+  <span class="sub">中国邮路问题：最少增程 · 全部同优集合精确计数 · 0 优先规范集 · 可核对闭合路线</span>
+</header>
+
+<div class="layout">
+  <!-- ================= editor ================= -->
+  <div class="panel">
+    <h2>① 管网编辑</h2>
+    <table class="grid">
+      <thead><tr><th colspan="2">节点（2–18 个，唯一 ASCII）</th></tr></thead>
+      <tbody id="nodeRows"></tbody>
+    </table>
+    <div class="btns">
+      <button class="ghost" id="addNode" type="button">+ 节点</button>
+    </div>
+
+    <table class="grid" style="margin-top:14px">
+      <thead><tr><th style="width:64px">管段标识</th><th style="width:84px">端点 A</th>
+        <th style="width:84px">端点 B</th><th style="width:70px">长度</th><th></th></tr></thead>
+      <tbody id="edgeRows"></tbody>
+    </table>
+    <div class="btns">
+      <button class="ghost" id="addEdge" type="button">+ 管段</button>
+    </div>
+
+    <div class="toolbar">
+      <label for="startSel">检修口（起点/终点）</label>
+      <select id="startSel"></select>
+    </div>
+    <div class="btns">
+      <button class="act" id="auditBtn" type="button">发起审计</button>
+      <button class="ghost" id="sampleBtn" type="button">载入示例</button>
+    </div>
+    <div id="error"></div>
+  </div>
+
+  <!-- ================= graph + summary ================= -->
+  <div class="panel">
+    <h2>② 审计结果与管网图</h2>
+    <div id="summary" style="display:none">
+      <div class="stats">
+        <div class="stat"><div class="k">原管网总长度</div><div class="v" id="sTotal"></div></div>
+        <div class="stat"><div class="k">最小增加长度</div><div class="v" id="sAdded"></div></div>
+        <div class="stat"><div class="k">同优重复集合数量</div><div class="v" id="sCount"></div></div>
+        <div class="stat"><div class="k">路线总长度</div><div class="v" id="sRoute"></div></div>
+      </div>
+      <div style="margin-top:10px">
+        <div class="k" style="color:var(--muted);font-size:12px">规范重复边（按标识顺序的 0 优先位向量）</div>
+        <div class="vector" id="sVector" style="margin-top:3px"></div>
+        <div class="chips" id="sChips"></div>
+        <div class="hint" id="sOdd"></div>
+      </div>
+    </div>
+    <svg id="graph" viewBox="0 0 800 520" preserveAspectRatio="xMidYMid meet"></svg>
+    <div class="legend">
+      <span><i style="background:var(--req)"></i>必重复</span>
+      <span><i style="background:var(--opt)"></i>可重复</span>
+      <span><i style="background:var(--never)"></i>从不重复</span>
+      <span><i style="background:var(--ok)"></i>检修口</span>
+      <span><i style="background:var(--opt);height:8px;width:8px;border-radius:50%"></i>奇度节点</span>
+    </div>
+    <div class="hint">点选图中管段或上方标签，可在右侧路线中高亮它的全部经过位置；再次点击取消。</div>
+  </div>
+
+  <!-- ================= route ================= -->
+  <div class="panel">
+    <h2>③ 规范闭合路线（逐步可核对）</h2>
+    <div id="routeEmpty" class="hint">审计成功后在此展示从检修口出发并返回的逐步路线。</div>
+    <div id="route"></div>
+  </div>
+</div>
+
+<script>
+"use strict";
+/* ---------------- state (persisted in inputs across failures) ---------- */
+let nodeCount = 0, edgeCount = 0;
+let lastResult = null;
+let selectedEdge = null;
+
+const $ = (id) => document.getElementById(id);
+
+function addNodeRow(value = "") {
+  const tr = document.createElement("tr");
+  tr.innerHTML =
+    `<td><input class="node-in" data-row="${nodeCount}" maxlength="24" value="${escapeAttr(value)}"></td>` +
+    `<td style="width:34px"><button class="row-del" type="button">✕</button></td>`;
+  tr.querySelector(".row-del").onclick = () => { tr.remove(); refreshNodeSelects(); };
+  tr.querySelector("input").addEventListener("input", refreshNodeSelects);
+  $("nodeRows").appendChild(tr);
+  nodeCount++;
+  refreshNodeSelects();
+}
+
+function currentNodes() {
+  return [...document.querySelectorAll(".node-in")].map(i => i.value.trim()).filter(Boolean);
+}
+
+function refreshNodeSelects() {
+  const nodes = [...document.querySelectorAll(".node-in")].map(i => i.value.trim());
+  // endpoint selects
+  document.querySelectorAll(".ep-a,.ep-b").forEach(sel => {
+    const prev = sel.value;
+    sel.innerHTML = nodes.map(n => n ? `<option>${escapeAttr(n)}</option>` : "").join("");
+    if (nodes.includes(prev)) sel.value = prev;
+  });
+  // start
+  const ss = $("startSel");
+  const prevStart = ss.value;
+  ss.innerHTML = nodes.filter(Boolean).map(n => `<option>${escapeAttr(n)}</option>`).join("");
+  if (nodes.filter(Boolean).includes(prevStart)) ss.value = prevStart;
+}
+
+function addEdgeRow(e = {}) {
+  const tr = document.createElement("tr");
+  tr.dataset.idx = edgeCount;
+  tr.innerHTML =
+    `<td><input class="ep-id" maxlength="24" value="${escapeAttr(e.id ?? "")}"></td>` +
+    `<td><select class="ep-a"></select></td>` +
+    `<td><select class="ep-b"></select></td>` +
+    `<td><input class="ep-len" type="number" min="1" step="1" style="text-align:right" value="${e.length ?? ""}"></td>` +
+    `<td><button class="row-del" type="button">✕</button></td>`;
+  tr.querySelector(".row-del").onclick = () => tr.remove();
+  $("edgeRows").appendChild(tr);
+  refreshNodeSelects();
+  if (e.u) tr.querySelector(".ep-a").value = e.u;
+  if (e.v) tr.querySelector(".ep-b").value = e.v;
+  edgeCount++;
+}
+
+function escapeAttr(s){ return String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+
+function clearBadMarks() {
+  document.querySelectorAll(".bad").forEach(el => el.classList.remove("bad"));
+}
+function markBad(locations) {
+  clearBadMarks();
+  (locations || []).forEach(loc => {
+    if (loc.field === "nodes") {
+      const rows = document.querySelectorAll("#nodeRows tr");
+      if (loc.row != null && rows[loc.row]) rows[loc.row].querySelector("input").classList.add("bad");
+      else document.querySelectorAll(".node-in").forEach(i => i.classList.add("bad"));
+    } else if (loc.field === "edges") {
+      const rows = document.querySelectorAll("#edgeRows tr");
+      if (loc.row != null && rows[loc.row]) {
+        rows[loc.row].querySelectorAll("input,select").forEach(el => el.classList.add("bad"));
+      } else document.querySelectorAll(".ep-id,.ep-a,.ep-b,.ep-len").forEach(el => el.classList.add("bad"));
+    } else if (loc.field === "start") {
+      $("startSel").classList.add("bad");
+    }
+  });
+}
+
+function clearConclusion() {
+  lastResult = null; selectedEdge = null;
+  $("summary").style.display = "none";
+  $("graph").innerHTML = "";
+  $("route").innerHTML = "";
+  $("routeEmpty").style.display = "";
+}
+
+/* ---------------- audit call ------------------------------------------- */
+async function doAudit() {
+  $("error").style.display = "none";
+  clearBadMarks();
+  const payload = {
+    nodes: [...document.querySelectorAll(".node-in")].map(i => i.value.trim()),
+    edges: [...document.querySelectorAll("#edgeRows tr")].map(tr => ({
+      id: tr.querySelector(".ep-id").value.trim(),
+      u: tr.querySelector(".ep-a").value,
+      v: tr.querySelector(".ep-b").value,
+      length: tr.querySelector(".ep-len").value,
+    })),
+    start: $("startSel").value,
+  };
+  let resp;
+  try {
+    const r = await fetch("/api/audit", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(payload),
+    });
+    resp = await r.json();
+  } catch (err) {
+    showError("网络或服务错误：" + err, []);
+    clearConclusion();
+    return;
+  }
+  if (!resp.ok) {
+    // 失败时保留输入并清除旧结论
+    showError(resp.error, resp.locations);
+    markBad(resp.locations);
+    clearConclusion();
+    return;
+  }
+  lastResult = resp;
+  renderSummary(resp);
+  renderGraph(resp);
+  renderRoute(resp);
+}
+
+function showError(msg, locs) {
+  const el = $("error");
+  let where = "";
+  if (locs && locs.length) {
+    where = "<div class='locs'>定位：" + locs.map(l => {
+      const name = l.field === "nodes" ? "节点表" : l.field === "edges" ? "管段表" : "检修口";
+      return l.row != null ? `${name} 第 ${l.row + 1} 行` : name;
+    }).join("；") + "</div>";
+  }
+  el.innerHTML = "✕ " + escapeAttr(msg) + where;
+  el.style.display = "block";
+}
+
+/* ---------------- summary ----------------------------------------------- */
+function renderSummary(r) {
+  $("summary").style.display = "";
+  $("sTotal").textContent = r.totalLength;
+  $("sAdded").textContent = r.addedLength + (r.eulerian ? "（欧拉管网，零增程）" : "");
+  $("sCount").textContent = r.optimalCount;
+  $("sRoute").textContent = r.totalLength + r.addedLength;
+  const vec = r.canonicalVector;
+  $("sVector").innerHTML = [...vec].map((b, i) =>
+    `<b class="${b === "1" ? "c1" : ""}">${b}</b>`).join("");
+  const chips = $("sChips");
+  chips.innerHTML = "";
+  r.edges.forEach(e => {
+    const c = document.createElement("span");
+    c.className = "chip " + e.classification + (e.duplicated ? " dup" : "");
+    c.dataset.edgeIndex = e.index;
+    c.textContent = `${e.id}${e.duplicated ? " ×2" : ""}·${{required:"必",optional:"可",never:"否"}[e.classification]}`;
+    c.onclick = () => selectEdge(selectedEdge === e.index ? null : e.index);
+    chips.appendChild(c);
+  });
+  $("sOdd").textContent = r.oddVertices.length
+    ? `奇度节点（${r.oddVertices.length}）：${r.oddVertices.join("、")}；规范重复边：${
+        r.canonicalEdges.length ? r.canonicalEdges.join("、") : "无"}`
+    : "所有节点度数均为偶数，无需重复任何管段。";
+}
+
+/* ---------------- graph ------------------------------------------------- */
+function renderGraph(r) {
+  const svg = $("graph");
+  svg.innerHTML = "";
+  const W = 800, H = 520;
+  const nodeSet = new Set(r.nodes);
+  // initial layout on a circle
+  const pos = {};
+  r.nodes.forEach((n, i) => {
+    const a = (i / r.nodes.length) * Math.PI * 2 - Math.PI / 2;
+    pos[n] = { x: W / 2 + Math.cos(a) * 190, y: H / 2 + Math.sin(a) * 190 };
+  });
+  // group parallel edges by unordered endpoint pair
+  const pairOf = (u, v) => [u, v].sort().join("");
+  const groups = {};
+  r.edges.forEach(e => (groups[pairOf(e.u, e.v)] ??= []).push(e));
+
+  // simple force simulation
+  const vel = Object.fromEntries(r.nodes.map(n => [n, {x:0, y:0}]));
+  for (let iter = 0; iter < 400; iter++) {
+    const f = Object.fromEntries(r.nodes.map(n => [n, {x:0, y:0}]));
+    for (let i = 0; i < r.nodes.length; i++)
+      for (let j = i + 1; j < r.nodes.length; j++) {
+        const a = pos[r.nodes[i]], b = pos[r.nodes[j]];
+        let dx = a.x - b.x, dy = a.y - b.y;
+        let d2 = dx*dx + dy*dy || 1;
+        const d = Math.sqrt(d2);
+        const rep = 9000 / d2;
+        f[r.nodes[i]].x += dx / d * rep;
+        f[r.nodes[i]].y += dy / d * rep;
+        f[r.nodes[j]].x -= dx / d * rep;
+        f[r.nodes[j]].y -= dy / d * rep;
+      }
+    r.edges.forEach(e => {
+      const a = pos[e.u], b = pos[e.v];
+      const dx = b.x - a.x, dy = b.y - a.y, d = Math.hypot(dx, dy) || 1;
+      const k = (d - 130) * 0.02;
+      f[e.u].x += dx / d * k * 12; f[e.u].y += dy / d * k * 12;
+      f[e.v].x -= dx / d * k * 12; f[e.v].y -= dy / d * k * 12;
+    });
+    r.nodes.forEach(n => {
+      f[n].x += (W/2 - pos[n].x) * 0.01;
+      f[n].y += (H/2 - pos[n].y) * 0.01;
+      const v = vel[n];
+      v.x = (v.x + f[n].x) * 0.85; v.y = (v.y + f[n].y) * 0.85;
+      pos[n].x = Math.max(40, Math.min(W-40, pos[n].x + v.x * 0.1));
+      pos[n].y = Math.max(36, Math.min(H-36, pos[n].y + v.y * 0.1));
+    });
+  }
+
+  const NS = "http://www.w3.org/2000/svg";
+  const mk = (tag, attrs) => {
+    const el = document.createElementNS(NS, tag);
+    for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+    return el;
+  };
+
+  // edges
+  Object.values(groups).forEach(group => {
+    const multi = group.length;
+    group.forEach((e, gi) => {
+      const a = pos[e.u], b = pos[e.v];
+      // curve offset for parallel edges
+      const off = multi === 1 ? 0 : (gi - (multi - 1) / 2) * 26;
+      const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+      const dx = b.x - a.x, dy = b.y - a.y, d = Math.hypot(dx, dy) || 1;
+      const cx = mx - dy / d * off, cy = my + dx / d * off;
+      const path = `M ${a.x} ${a.y} Q ${cx} ${cy} ${b.x} ${b.y}`;
+      const line = mk("path", { d: path, class:
+        `edge-line ${e.classification}${e.duplicated ? " dup" : ""}` });
+      line.dataset.edgeIndex = e.index;
+      const hit = mk("path", { d: path, class: "edge-hit" });
+      hit.addEventListener("click", () =>
+        selectEdge(selectedEdge === e.index ? null : e.index));
+      svg.appendChild(line); svg.appendChild(hit);
+      const lab = mk("text", { x: cx, y: cy - 4, class: "elabel", "text-anchor":"middle" });
+      lab.textContent = e.id + (e.duplicated ? " ×2" : "");
+      lab.dataset.edgeIndex = e.index;
+      svg.appendChild(lab);
+    });
+  });
+
+  // nodes
+  const odd = new Set(r.oddVertices);
+  r.nodes.forEach(n => {
+    const p = pos[n];
+    const c = mk("circle", { cx: p.x, cy: p.y, r: 13, class:
+      "node-circle" + (n === r.start ? " start" : odd.has(n) ? " odd" : "") });
+    svg.appendChild(c);
+    const t = mk("text", { x: p.x, y: p.y + 3.5,
+      class: "nlabel" + (n === r.start ? " start" : "") });
+    t.textContent = n;
+    svg.appendChild(t);
+  });
+}
+
+/* ---------------- route -------------------------------------------------- */
+function renderRoute(r) {
+  $("routeEmpty").style.display = "none";
+  const box = $("route");
+  box.innerHTML = "";
+  r.route.forEach((st, i) => {
+    const div = document.createElement("div");
+    div.className = "rstep";
+    div.dataset.edgeIndex = st.edgeIndex;
+    div.innerHTML =
+      `<span class="seq">${st.seq}.</span>` +
+      `<span class="eid">${escapeAttr(st.edgeId)}</span>` +
+      `<span>${escapeAttr(st.from)} → ${escapeAttr(st.to)}</span>` +
+      `<span class="copy">第 ${st.copy} 副本</span>` +
+      `<span class="len">${st.length}</span>`;
+    box.appendChild(div);
+  });
+  selectedEdge = null;
+}
+
+function selectEdge(index) {
+  selectedEdge = index;
+  document.querySelectorAll(".edge-line").forEach(el =>
+    el.classList.toggle("sel", Number(el.dataset.edgeIndex) === index));
+  document.querySelectorAll(".elabel").forEach(el =>
+    el.classList.toggle("sel", Number(el.dataset.edgeIndex) === index));
+  document.querySelectorAll(".chip").forEach(el =>
+    el.classList.toggle("sel", Number(el.dataset.edgeIndex) === index));
+  let firstHl = null;
+  document.querySelectorAll(".rstep").forEach(el => {
+    const hl = Number(el.dataset.edgeIndex) === index;
+    el.classList.toggle("hl", hl);
+    if (hl && !firstHl) firstHl = el;
+  });
+  if (firstHl) firstHl.scrollIntoView({block:"center", behavior:"smooth"});
+}
+
+/* ---------------- sample & init ------------------------------------------ */
+function loadSample() {
+  document.querySelectorAll("#nodeRows tr,#edgeRows tr").forEach(t => t.remove());
+  // K4 unit graph: 3 distinct optimal sets
+  ["A","B","C","D"].forEach(n => addNodeRow(n));
+  [["e1","A","B",1],["e2","A","C",1],["e3","A","D",1],
+   ["e4","B","C",1],["e5","B","D",1],["e6","C","D",1]]
+    .forEach(([id,u,v,l]) => addEdgeRow({id,u,v,length:l}));
+  refreshNodeSelects();
+  $("startSel").value = "A";
+}
+
+$("addNode").onclick = () => addNodeRow();
+$("addEdge").onclick = () => addEdgeRow();
+$("auditBtn").onclick = doAudit;
+$("sampleBtn").onclick = loadSample;
+
+// initial blank rows
+addNodeRow(""); addNodeRow("");
+addEdgeRow();
+refreshNodeSelects();
+</script>
+</body>
+</html>
